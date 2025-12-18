@@ -1,406 +1,166 @@
 # LRU Cache: In-Memory Key-Value Store
 
+This project implements a bounded in-memory key-value cache with **Least Recently Used (LRU)** eviction. The goal is not just to make an LRU cache work, but to design it in a way that is easy to reason about, extend, and debug as the system grows.
+
+The project is intentionally built in **axes**, where each axis adds a new concern without rewriting the previous ones.
+
+---
+
 ## Problem Statement
 
-This cache solves the problem of maintaining a bounded in-memory key-value store that automatically manages memory by evicting entries when capacity is exceeded. The challenge is maintaining both fast lookups and efficient tracking of access patterns.
+We want a cache with a fixed capacity that:
 
-## Why LRU Eviction?
+* Supports fast key lookups
+* Automatically evicts old entries when full
+* Preserves deterministic and explainable behavior
 
-Least Recently Used (LRU) eviction is appropriate because:
+The core challenge is balancing **time complexity**, **correct eviction order**, and **maintainability**.
 
-1. **Temporal Locality**: Recently accessed items are likely to be accessed again soon
-2. **Predictable Behavior**: The eviction policy is deterministic and easy to reason about
-3. **Widely Applicable**: LRU works well for many real-world access patterns (web caches, database buffers, OS page replacement)
+---
 
-When capacity is exceeded, we evict the item that hasn't been touched in the longest time, preserving items that are actively being used.
+## Why LRU Eviction
 
-## O(1) Guarantee
+LRU eviction works well for many real-world workloads due to temporal locality: recently accessed items are more likely to be accessed again.
 
-All operations run in constant time because:
+Other reasons for choosing LRU here:
 
-### Data Structure Choice: `collections.OrderedDict`
+* Predictable and easy-to-explain behavior
+* Widely used in practice (OS page replacement, DB buffers, HTTP caches)
+* Straightforward to validate and debug
 
-`OrderedDict` is a hash table that maintains insertion order. It provides:
+The goal is not to claim LRU is universally optimal, but that it is a strong default policy to build around.
 
-- **O(1) lookup**: Hash table provides constant-time key access
-- **O(1) reordering**: `move_to_end()` moves an item to the end in constant time
-- **O(1) eviction**: `popitem(last=False)` removes the oldest item in constant time
+---
 
-### Operation Analysis
+## Axis 1: Core LRU Cache
 
-- **`get(key)`**: 
-  - Hash lookup: O(1)
-  - Move to end: O(1)
-  - Total: O(1)
+### Data Structure Choice
 
-- **`put(key, value)`**:
-  - Hash lookup: O(1)
-  - Insert/update: O(1)
-  - Move to end: O(1)
-  - Evict (if needed): O(1)
-  - Total: O(1)
+The cache is implemented using `collections.OrderedDict`.
+
+This gives us:
+
+* Constant-time key lookup
+* Constant-time reordering on access
+* Constant-time eviction of the least recently used item
+
+A custom hash map + doubly linked list was considered initially, but that approach added complexity without providing much benefit at this stage.
+
+### Complexity
+
+Both `get` and `put` operations run in constant time.
+
+Eviction is deterministic: when capacity is exceeded, the entry that has not been accessed for the longest time is removed.
+
+---
 
 ## Design Decisions
 
-### 1. Encapsulation of Internal State
+### Encapsulation
 
-All internal data structures are private (prefixed with `_`):
-- `_cache`: The OrderedDict storing key-value pairs
-- `_capacity`: Maximum number of entries
+All internal state is private:
 
-This prevents external code from bypassing the cache's eviction logic or violating invariants.
+* `_cache` stores key-value pairs
+* `_capacity` defines the upper bound
 
-### 2. Separation of Eviction Logic
+This prevents callers from bypassing eviction logic or mutating internal structures directly.
 
-Eviction is handled by dedicated private methods:
-- `_evict_if_needed()`: Checks capacity and triggers eviction
-- `_evict_least_recently_used()`: Performs the actual eviction
+### Separation of Responsibilities
 
-This separation makes it clear where eviction happens and makes it easy to swap eviction strategies in the future.
+Eviction logic is isolated in dedicated methods rather than being embedded directly into `put()`.
 
-### 3. Extensibility for Alternative Eviction Policies
+This keeps the control flow readable and makes future eviction strategies easier to experiment with.
 
-The design makes it obvious how to add other eviction policies:
+### OrderedDict vs Custom Implementation
 
-1. **Override `_evict_least_recently_used()`**: For LFU, random, or FIFO policies
-2. **Override `_mark_recently_used()`**: For policies that track usage differently
-3. **Add tracking data structures**: Without changing `get()` or `put()` signatures
+Using `OrderedDict` trades some low-level control for clarity and correctness. Given the goals of this axis, this tradeoff felt reasonable.
 
-The public API (`get` and `put`) remains unchanged regardless of eviction policy.
+---
 
-### 4. OrderedDict vs. Custom Implementation
+## Mistakes and Iterations
 
-We use `OrderedDict` instead of manually implementing a hash map + doubly linked list because:
+The first version of this cache used a custom hash map combined with a manually maintained doubly linked list.
 
-- **Clarity**: The code is immediately readable
-- **Correctness**: We rely on a well-tested standard library component
-- **Maintainability**: Less code to maintain and debug
+While this gave full control over the data structures, it quickly became tedious to reason about pointer updates and edge cases around eviction order, especially once metrics were added.
 
-The tradeoff is slightly less control over internal representation, but for Axis 1 (clean design), this is the right choice.
+After a few iterations, it became clear that the extra control was not worth the complexity for this stage of the project. Switching to `OrderedDict` significantly reduced surface area for bugs and made the core logic easier to reason about.
 
-### 5. Return Value for Missing Keys
+---
 
-`get()` returns `None` for missing keys. This is Pythonic and allows callers to use:
-```python
-value = cache.get(key)
-if value is not None:
-    # use value
-```
+## Axis 2: Observability and Metrics
 
-## Tradeoffs
+A cache that cannot be measured is hard to trust.
 
-### What We Gain
+This axis adds lightweight metrics to understand whether the cache is actually helping:
 
-- **Simplicity**: Clear, readable code
-- **Correctness**: Standard library reduces bugs
-- **Extensibility**: Easy to add new eviction policies
-- **Performance**: All operations are O(1)
+* Cache hits
+* Cache misses
+* Evictions
 
-### What We Accept
+From these values, a hit ratio is derived.
 
-- **Memory Overhead**: OrderedDict has slightly more overhead than a custom implementation
-- **Limited Control**: We can't fine-tune the hash table or linked list internals
-- **Single Policy**: Only LRU is implemented (by design for Axis 1)
+The metrics are updated at the exact points where events occur, rather than being inferred later. This keeps them accurate and easy to validate.
 
-## Observability and Metrics (Axis 2)
+### Interpreting Metrics
 
-### Why Observability Matters for Caches
+* High hit ratio suggests the cache is effective
+* Frequent evictions may indicate insufficient capacity
+* A consistently low hit ratio may suggest caching is not appropriate for the workload
 
-A cache is only useful if it's actually working. Without metrics, you're flying blind:
+The cache does not attempt to self-tune based on metrics. Interpretation and action are left to the caller.
 
-- **Is the cache helping?** High hit rates mean the cache is effective; low hit rates suggest the cache isn't worth the memory.
-- **Are we wasting memory?** Frequent evictions might indicate the capacity is too small, or the access pattern doesn't benefit from caching.
-- **Is the eviction policy appropriate?** Metrics reveal whether LRU is the right choice for your workload.
+---
 
-Guessing cache effectiveness is unreliable. Metrics provide objective data to make informed decisions about capacity, eviction policies, and whether caching is appropriate for your use case.
+## Axis 3: Persistence
 
-### Available Metrics
+An in-memory cache is lost on process restart. Persistence allows:
 
-The cache tracks three core counters:
+* Warm restarts
+* Preservation of eviction order
+* Continuity of metrics
 
-1. **`hits`**: Number of successful `get()` operations where the key was found
-2. **`misses`**: Number of `get()` operations where the key was not found
-3. **`evictions`**: Number of entries removed due to capacity constraints
-
-### Hit Ratio
-
-The `hit_ratio` is calculated as:
-
-```
-hit_ratio = hits / (hits + misses)
-```
-
-**Interpreting Hit Ratio:**
-
-- **High hit ratio (0.8-1.0)**: The cache is highly effective. Most requests are served from cache, reducing expensive lookups.
-- **Medium hit ratio (0.5-0.8)**: The cache is providing value, but there's room for improvement. Consider increasing capacity or analyzing access patterns.
-- **Low hit ratio (<0.5)**: The cache may not be effective for this workload. Consider:
-  - Whether caching is appropriate for this access pattern
-  - Whether the capacity is too small
-  - Whether a different eviction policy (e.g., LFU) might work better
-
-A hit ratio of 0.0 means no requests have been served from cache yet (all misses). This is safe to handle and returns 0.0 rather than causing a division-by-zero error.
-
-### Using Metrics
-
-```python
-from lru_cache import LRUCache
-
-cache = LRUCache(capacity=100)
-
-# ... use cache ...
-
-stats = cache.get_stats()
-print(f"Hit ratio: {stats['hit_ratio']:.2%}")
-print(f"Total requests: {stats['hits'] + stats['misses']}")
-print(f"Evictions: {stats['evictions']}")
-```
-
-### Design Decisions for Metrics
-
-Metrics are tracked internally without cluttering the core cache logic:
-
-- **Separate recording methods**: `_record_hit()`, `_record_miss()`, `_record_eviction()` keep metrics updates isolated
-- **No performance impact**: Simple integer increments are O(1) and don't affect cache operations
-- **Accurate placement**: Metrics are updated exactly where the events occur:
-  - Hits/misses in `get()`
-  - Evictions in `_evict_least_recently_used()`
-
-This design maintains the cache's readability while providing essential observability.
-
-## Persistence (Axis 3)
-
-### Why Persistence Matters
-
-A cache that only exists in memory is lost when the process terminates. Persistence allows the cache to survive restarts, enabling:
-
-- **State preservation**: Cache contents persist across application restarts
-- **Warm starts**: Applications can resume with a pre-populated cache
-- **Metrics continuity**: Historical metrics are preserved for analysis
-- **Crash recovery**: Cache state can be restored after unexpected shutdowns
-
-Without persistence, every restart means starting with an empty cache, losing all accumulated state and requiring time to rebuild effectiveness.
+The cache can be serialized to and restored from disk using JSON.
 
 ### Serialization Format
 
-The cache is serialized to JSON, a human-readable format that's easy to inspect and debug. The format preserves all state needed for correctness:
+The serialized state preserves:
 
-```json
-{
-  "capacity": 3,
-  "entries": [
-    {"key": 1, "value": "one"},
-    {"key": 2, "value": "two"},
-    {"key": 3, "value": "three"}
-  ],
-  "metrics": {
-    "hits": 5,
-    "misses": 2,
-    "evictions": 1
-  }
-}
-```
+* Capacity
+* Cache entries in exact LRU order
+* Metrics counters
 
-**Key Design Decisions:**
+The order of entries is critical: the first element is the least recently used, and the last is the most recently used.
 
-1. **Ordered entries list**: The `entries` array preserves LRU ordering exactly. The first entry is the least recently used, the last entry is the most recently used. This order is critical for correct cache behavior after load.
+Validation is performed during load to ensure invariants are not violated.
 
-2. **Separate metrics object**: Metrics are stored separately from cache entries, making the format clear and extensible.
+---
 
-3. **Human-readable**: JSON format allows manual inspection and debugging, which is valuable for a systems component.
+## Axis 4: Concurrency and Thread Safety
 
-### What Gets Preserved
+The cache supports concurrent access using a single coarse-grained lock.
 
-The serialization preserves all state that defines cache correctness:
+All public methods acquire the same lock, ensuring:
 
-- **Capacity**: Maximum number of entries
-- **Cache entries**: All key-value pairs in exact LRU order
-- **Metrics**: Hits, misses, and evictions counters
+* Atomic operations
+* Consistent eviction behavior
+* Correct metric tracking
 
-After loading, the cache behaves identically to before saving:
-- Same entries in the same order
-- Same metrics values
-- Same capacity constraints
-- Same eviction behavior
+This approach prioritizes correctness and simplicity over maximum throughput. In practice, worrying about fine-grained locking here is premature unless profiling shows the cache itself is a bottleneck.
 
-### Using Persistence
+---
 
-```python
-from lru_cache import LRUCache
+## What Is Intentionally Not Implemented
 
-# Create and use cache
-cache = LRUCache(capacity=100)
-cache.put(1, "one")
-cache.put(2, "two")
-cache.get(1)
+This project deliberately avoids:
 
-# Save to disk
-cache.save("cache_state.json")
+* Fine-grained or lock-free concurrency
+* Alternative eviction policies (LFU, FIFO, etc.)
+* Automatic persistence
+* External monitoring integrations
 
-# Later, load from disk
-loaded_cache = LRUCache.load("cache_state.json")
+These are possible future axes, but are out of scope for now.
 
-# Cache behaves identically
-assert loaded_cache.get(1) == "one"
-assert loaded_cache.get_stats() == cache.get_stats()
-```
-
-### Invariant Validation
-
-After loading, the cache validates that invariants are preserved:
-
-1. **Capacity constraint**: The number of loaded entries must not exceed capacity
-2. **Non-negative metrics**: All metric counters must be non-negative
-3. **Order preservation**: LRU order is maintained exactly as saved
-
-If validation fails, a `ValueError` is raised, preventing the cache from entering an invalid state.
-
-### Design Decisions for Persistence
-
-1. **JSON over binary**: JSON is human-readable and debuggable, which is more valuable than the slight performance gain of binary formats for this use case.
-
-2. **Class method for load**: `load()` is a class method, making it clear that it creates a new cache instance rather than modifying an existing one.
-
-3. **Validation after load**: Explicit validation ensures the loaded state is correct before the cache is used.
-
-4. **No automatic persistence**: The cache doesn't auto-save on every operation. This keeps the API simple and gives callers control over when persistence happens.
-
-5. **Complete state preservation**: All metrics are preserved, not just cache entries. This allows analysis of cache effectiveness across restarts.
-
-## Concurrency & Thread Safety (Axis 4)
-
-### Why Shared Mutable State Is Dangerous
-
-When multiple threads access the same cache instance without synchronization, race conditions can corrupt internal state:
-
-1. **Lost Updates**: Two threads updating metrics simultaneously can cause one update to be lost
-2. **Inconsistent Ordering**: A thread reading the cache while another modifies it can see partially updated LRU order
-3. **Corrupted Metrics**: Concurrent increments to hit/miss counters can result in incorrect totals
-4. **Capacity Violations**: Two threads adding entries simultaneously can exceed capacity before eviction occurs
-5. **Persistence Corruption**: Saving while another thread modifies the cache can write inconsistent state
-
-Without proper synchronization, these race conditions can cause the cache to violate its invariants, return incorrect values, or crash.
-
-### Race Conditions Without Locks
-
-Consider what could happen without synchronization:
-
-**Example 1: Metric Corruption**
-```python
-# Thread 1: cache.get(key) -> increments _hits
-# Thread 2: cache.get(key) -> increments _hits
-# Without locks: Both threads read _hits=5, both write _hits=6
-# Result: _hits should be 7, but is 6 (lost update)
-```
-
-**Example 2: LRU Order Corruption**
-```python
-# Thread 1: cache.get(1) -> moves key 1 to end
-# Thread 2: cache.get(2) -> moves key 2 to end
-# Without locks: Both operations can interleave, corrupting the order
-# Result: LRU order is incorrect, eviction removes wrong entry
-```
-
-**Example 3: Capacity Violation**
-```python
-# Thread 1: cache.put(1, v1) -> checks capacity, adds entry
-# Thread 2: cache.put(2, v2) -> checks capacity, adds entry
-# Without locks: Both see capacity not exceeded, both add entries
-# Result: Cache exceeds capacity before eviction runs
-```
-
-### Chosen Locking Strategy
-
-The cache uses **coarse-grained locking** with a single `threading.Lock`:
-
-- **One lock protects all shared state**: `_cache`, `_hits`, `_misses`, `_evictions`
-- **Public methods are critical sections**: Each public method (`get`, `put`, `get_stats`, `save`) acquires the lock at entry and releases it at exit
-- **Context managers ensure safety**: The `with self._lock:` statement guarantees the lock is released even if an exception occurs
-
-### Why Coarse-Grained Locking
-
-Coarse-grained locking was chosen for several reasons:
-
-1. **Correctness First**: A single lock eliminates all race conditions. Every operation is atomic, ensuring invariants are never violated.
-
-2. **Simplicity**: The locking strategy is easy to understand, audit, and maintain. There's no risk of deadlock from multiple locks or complex lock ordering.
-
-3. **Clear Synchronization Boundaries**: Public methods define the synchronization boundary. All internal state is protected by the same lock, making it obvious what's protected.
-
-4. **Maintainability**: Adding new methods or modifying existing ones doesn't require understanding complex lock hierarchies or fine-grained locking protocols.
-
-5. **Sufficient for Many Use Cases**: For most applications, the cache is not the bottleneck. The simplicity and correctness of coarse-grained locking outweighs the performance cost.
-
-### Tradeoffs: Simplicity vs. Throughput
-
-**What We Gain:**
-- **Correctness**: No race conditions, no corrupted state
-- **Simplicity**: Easy to reason about and maintain
-- **Safety**: Context managers prevent deadlocks from forgotten lock releases
-
-**What We Accept:**
-- **Lower Throughput**: Only one thread can access the cache at a time
-- **Potential Contention**: High-concurrency workloads may see threads waiting for the lock
-
-**When This Matters:**
-- If the cache is the bottleneck and profiling shows lock contention, fine-grained locking or lock-free structures could be considered
-- For most applications, the cache operations are fast enough that coarse-grained locking provides sufficient performance
-
-The design prioritizes correctness and maintainability over micro-optimizations. If performance becomes an issue, it can be addressed in a future axis with profiling data to guide optimization.
-
-### Implementation Details
-
-All public methods that access shared state are protected:
-
-```python
-def get(self, key):
-    with self._lock:  # Acquire lock
-        # ... all cache operations ...
-        return value  # Lock released automatically
-
-def put(self, key, value):
-    with self._lock:  # Acquire lock
-        # ... all cache operations ...
-        # Lock released automatically
-
-def get_stats(self) -> dict:
-    with self._lock:  # Acquire lock
-        # ... read metrics ...
-        return stats  # Lock released automatically
-
-def save(self, filepath: str):
-    with self._lock:  # Acquire lock
-        # ... serialize state ...
-        # Lock released automatically
-```
-
-The `load()` class method doesn't need locking because it creates a new cache instance and doesn't access shared state from an existing instance.
-
-### Thread Safety Guarantees
-
-With the lock in place, the cache guarantees:
-
-1. **Atomic Operations**: Each `get`, `put`, `get_stats`, and `save` operation is atomic
-2. **Consistent State**: No thread can see partially updated cache state
-3. **Correct Metrics**: All metric updates are serialized, preventing lost updates
-4. **LRU Order Integrity**: LRU ordering operations are atomic, preventing corruption
-5. **Capacity Invariants**: Capacity checks and evictions are atomic, preventing violations
-
-## What Is Intentionally NOT Implemented
-
-This is Axis 4: Concurrency & Thread Safety. The following remain deferred:
-
-- **Fine-Grained Locking**: No read-write locks or per-bucket locking
-- **Lock-Free Algorithms**: No lock-free data structures or atomic operations
-- **Alternative Eviction Policies**: Only LRU is implemented
-- **CLI/Web Interface**: No user-facing interface
-- **Performance Benchmarking**: No performance profiling tools
-- **Logging Framework**: No structured logging
-- **External Monitoring**: No integration with monitoring systems
-- **Async I/O**: No asyncio support
-- **Multiprocessing**: No support for multiprocessing (only threading)
-
-These will be addressed in future axes as the project grows.
+---
 
 ## Usage
 
@@ -408,18 +168,14 @@ These will be addressed in future axes as the project grows.
 from lru_cache import LRUCache
 
 cache = LRUCache(capacity=2)
-
 cache.put(1, "one")
 cache.put(2, "two")
-value = cache.get(1)  # Returns "one", marks 1 as recently used
-
-cache.put(3, "three")  # Evicts key 2 (least recently used)
-cache.get(2)  # Returns None (was evicted)
+cache.get(1)
+cache.put(3, "three")  # evicts key 2
 ```
 
-## Running Tests
+---
 
-```bash
-python demo.py
-```
+## Notes
 
+This project is intentionally incremental. Each axis adds complexity only after the previous one is stable and understandable. The emphasis is on clarity, correctness, and evolution rather than maximal feature coverage from the start.
