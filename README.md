@@ -269,14 +269,14 @@ This is the architecture used by:
 ┌─────────────────────────────────────────┐
 │         MobileCache (Orchestrator)      │
 │                                         │
-│  ┌──────────────┐      ┌─────────────┐ │
-│  │   Memory     │      │    Disk     │ │
-│  │   Cache      │      │   Cache     │ │
-│  │ (SizedLRU)   │      │ (Filesystem)│ │
-│  │              │      │             │ │
-│  │ Fast, Limited│      │ Slow, Large │ │
-│  │ Volatile     │      │ Persistent  │ │
-│  └──────────────┘      └─────────────┘ │
+│  ┌──────────────┐      ┌─────────────┐  │
+│  │   Memory     │      │    Disk     │  │
+│  │   Cache      │      │   Cache     │  │
+│  │ (SizedLRU)   │      │ (Filesystem)│  │
+│  │              │      │             │  │
+│  │ Fast, Limited│      │ Slow, Large │  │
+│  │ Volatile     │      │ Persistent  │  │
+│  └──────────────┘      └─────────────┘  │
 └─────────────────────────────────────────┘
 ```
 
